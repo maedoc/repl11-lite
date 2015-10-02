@@ -2,6 +2,8 @@
 
 import os
 import sys
+import time
+import atexit
 
 # check hook name doesn't exist
 hook_fname = 'r11'
@@ -13,9 +15,7 @@ if os.path.exists(hook_fname):
 if os.fork() > 0:
     sys.exit(0)
 
-import time
-import atexit
-
+# capture std{out,err}
 class CapturedOut(object):
     def __init__(self):
         self._text = ''
@@ -29,12 +29,14 @@ class CapturedOut(object):
         self._text = ''
         return text
 
+# some globals
 stdout, stderr = sys.stdout, sys.stderr
 out = sys.stdout = sys.stderr = CapturedOut()
 pid = os.getpid()
+ns = {}
 
 # set up logging
-log_file = open('repl11-%d.log' % (pid, ), 'w')
+log_file = open('.repl11-%d.log' % (pid, ), 'w')
 def log(fmt, *args):
     if args:
         fmt %= args
@@ -43,11 +45,9 @@ def log(fmt, *args):
     log_file.write(hdr + fmt + '\n')
     log_file.flush()
 
-# setup fifos
-fifo_in = '.repl11-in.fifo'
-fifo_out = '.repl11-out.fifo'
-os.mkfifo(fifo_in)
-os.mkfifo(fifo_out)
+# setup fifo
+fifo = '.repl11-%d.fifo' % (pid, )
+os.mkfifo(fifo)
 
 hook_source = """#!/usr/bin/env python
 
@@ -62,42 +62,40 @@ text = sys.stdin.read()
 
 sys.stdout.write(text)
 
-with open('{fin}', 'w') as fd:
+with open('{fifo}', 'w') as fd:
     fd.write(text)
 
-with open('{fout}', 'r') as fd:
+with open('{fifo}', 'r') as fd:
     for line in fd.readlines():
         line = line.strip()
         if line:
             sys.stdout.write('# ' + line)
-""".format(fin=fifo_in, fout=fifo_out, pid=pid)
+""".format(fifo=fifo, pid=pid)
 
 with open(hook_fname, 'w') as fd:
     fd.write(hook_source)
-
 os.chmod(hook_fname, 0o744)
 
 # remember to clean them up at exit
 @atexit.register
 def unlink_fifos():
-    os.unlink(fifo_in)
-    os.unlink(fifo_out)
+    os.unlink(fifo)
     os.unlink(hook_fname)
     log_file.close()
     os.unlink(log_file.name)
 
+# the actual repl part
 while True:
     log('reading from exec...')
-    with open(fifo_in, 'r') as fd:
+    with open(fifo, 'r') as fd:
         source = fd.read()
     log('executing %r...', source[:20])
     try:
-        exec source
+        exec source in ns
     except Exception as exc:
         print('exception occurred: %r' % (exc,))
     result = out.text
     log('writing to result %r...', result[:20])
-    with open(fifo_out, 'w') as fd:
+    with open(fifo, 'w') as fd:
         fd.write(result + '\n')
     log('results written.')
-
